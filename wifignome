@@ -1,0 +1,260 @@
+#!/bin/bash
+
+WIFI_DEVICE=''
+BASE='/Library/Preferences/SystemConfiguration/'
+
+LOG_RUN=$(date +%F\ %T)
+
+## declare an array variable
+declare -a config_files=("com.apple.airport.preferences.plist" "com.apple.network.eapolclient.configuration.plist" "com.apple.wifi.message-tracer.plist" "NetworkInterfaces.plist" "preferences.plist")
+
+RES=0
+SHOWHELP=0
+COMPARE=0
+BACKUP=0
+DELETECONFIG=0
+
+function main() {
+    OPTIND=1 # reset optind in case getopts has been used previously in the shell
+
+    while getopts "h?b:r:c:d" opt; do
+        case "$opt" in
+            h|\?)
+                SHOWHELP=1
+                ;;
+            b)
+                BACKUPFOLDER="$OPTARG"
+                BACKUP=1
+                ;;
+            c)
+                BACKUPFOLDER="$OPTARG"
+                COMPARE=1
+                ;;
+            d)
+                DELETECONFIG=1
+                ;;
+        esac
+    done
+
+    shift $((OPTIND-1))
+
+    [ "${1:-}" == "--" ] && shift
+
+    if [ $SHOWHELP -eq 1 ]; then
+        show_help
+        return $?
+    fi
+
+    if [ $RES -eq 0 -a $COMPARE -eq 1 ]; then
+        compare_network_files "$BACKUPFOLDER" "${config_files[@]}"
+        return $?
+    fi
+
+    if [ $RES -eq 0 -a $BACKUP -eq 1 ]; then
+        backup_network_files "$BACKUPFOLDER"
+        RES=$?
+    fi
+
+    if [ $RES -eq 0 -a $DELETECONFIG -eq 1 ]; then
+        delete_network_files
+        RES=$?
+    fi
+
+    return $RES
+}
+
+function show_help() {
+    echo "        __"
+    echo "     .-'  |"
+    echo "    /   <\|"
+    echo "   /     \'"
+    echo "   |_.- o-o"
+    echo "   / C  -._)\\"
+    echo "  /',        |"
+    echo " |   \`-,_,__,'"
+    echo " (,,)====[_]=|"
+    echo "   '.   ____/"
+    echo "    | -|-|_"
+    echo "    |____)_)"
+    echo ""
+    echo "usage:"
+    echo "  ${0} [-options]"
+    echo ""
+    echo "  -h/?       |  Show this information"
+    echo "  -c folder  |  Compare backup with current system network configuration"
+    echo "  -b folder  |  Backup network configuration files to this folder"
+    echo "  -d folder  |  Delete network configuration files from system"
+    echo "  -r folder  |  Restore network configuration files from this folder"
+
+    return 0 #success
+}
+
+function backup_network_files() {
+    local folder=$1
+
+    # Make sure dir exists    
+    if ! [ -d "$folder" ]; then
+        log "Couldn't find folder '$folder'"
+        return 1
+    fi
+
+    # Make sure wifi exists
+    find_wifi_device
+    if [ ! $? -eq 0 ]; then 
+        log "Unable to find Wi-Fi device!"
+        return 2
+    fi
+    log "Found Wi-Fi device with identifier: '$WIFI_DEVICE'"
+
+    turn_wifi "$WIFI_DEVICE" "off"
+    if [ ! $? -eq 0 ]; then
+        log "failed to turn wifi off!"
+        return 3
+    fi
+
+    # Backup existing configuration
+    copy_files "$folder" "${config_files[@]}" 
+    if [ ! $? -eq 0 ]; then
+        log "Failed to backup current network configuration files"
+        return 4
+    fi
+
+    return 0 #success
+}
+
+function delete_network_files() {
+    delete_files "$BASE" "${config_files[@]}"
+    if [ ! $? -eq 0 ]; then
+        log "Failed to delete current network configuration files"
+        return 1
+    fi
+    
+    return 0 # success
+}
+
+function compare_network_files() {
+    local backupfolder=$1      # Save first argument in a variable
+    shift                # Shift all arguments to the left (original $1 gets lost)
+    local files=("$@")   # Recunstruct the array
+
+    # Make sure dir exists    
+    if ! [ -d "$backupfolder" ]; then
+        log "Couldn't find folder '$backupfolder'"
+        return 1
+    fi
+
+    # compare known files in the backup with current system preferences
+    for file in "${files[@]}"
+    do
+        if [ -f "${backupfolder}/${file}" -a -f "${BASE}/${file}" ]; then
+    
+            INVESTIGATIONRESULT="MISMATCH"
+            if [ $(md5 -q "${BASE}/${file}") == $(md5 -q "${backupfolder}/${file}") ]; then
+                INVESTIGATIONRESULT="MATCH"
+            fi
+            #  /usr/libexec/PlistBuddy -x -c "Print" "${backupfolder}/${file}"
+            
+            log "$INVESTIGATIONRESULT: '${file}'"
+        else
+            log "Skipping over '${file}' as it doesn't exist in both places."
+        fi
+    done
+
+    return 0 # success
+} 
+
+function log() {
+    echo "${LOG_RUN} | $1"
+}
+
+function find_wifi_device() {
+    
+    local count=$(networksetup -listallhardwareports | grep "Hardware Port: Wi-Fi" | wc -l)
+    if [ "$count" -eq 0 ]; then
+        log "Unable to find WiFi hardware"
+        return 1
+    fi
+
+    local wifi_device=$(networksetup -listallhardwareports | grep "Hardware Port: Wi-Fi" -A 1 | awk 'FNR==2{print $2}')
+    if [ -z "$wifi_device" ]; then
+        log "Unable to find wifi device identifier"
+        return 2
+    fi
+
+    WIFI_DEVICE="$wifi_device"
+    return 0 # success
+}
+
+function turn_wifi() {
+    local device="$1"
+    local desired_state="$2"
+    local current_state=$(networksetup -getairportpower "$device" | awk 'NF>1{print tolower($NF)}')
+
+    if [ "$desired_state" == "$current_state" ]; then
+        log "Wi-Fi device '$device' is already '$current_state'."
+    else
+        case "$desired_state" in
+            on|off)
+                log "Turning $desired_state network device '$device'"
+                networksetup -setairportpower "$device" "$desired_state"
+                ;;
+            *)
+                log "Unknown desired state '$desired_state' for device '$device'"
+                return 1
+                ;;
+        esac
+    fi
+    return 0
+}
+
+function copy_files() {
+    local destination=$1 # Save first argument in a variable
+    shift                # Shift all arguments to the left (original $1 gets lost)
+    local files=("$@")
+
+    for file in "${files[@]}"
+    do
+        if [ -f "${BASE}/${file}" ]; then
+            if [ -f ${destination}/${file} ]; then
+                log "Failed as '${file}' already exits in '${destination}'"
+                return 1
+            elif cp "${BASE}/${file}" "${destination}/${file}"; then
+                log "Successfully backed up '${file}' ($(md5 -q "${BASE}/${file}"))"
+            else
+                log "An unknown error occured while backing up '${file}'"
+                return 2
+            fi
+        else
+            log "Skipping over '${file}' as it doesn't exist."
+        fi
+    done
+
+    return 0 # success
+}
+
+function delete_files() {
+    local folder=$1      # Save first argument in a variable
+    shift                # Shift all arguments to the left (original $1 gets lost)
+    local files=("$@")
+
+    for file in "${files[@]}"
+    do
+        if [ -f "${folder}/${file}" ]; then
+            if sudo rm "${folder}/${file}"; then
+                log "!Deleted! '${folder}/${file}' permanently"
+            else
+                log "An unknown error occured while deleting '${file}'"
+                return 1
+            fi
+        else
+            log "Skipping over '${file}' as it doesn't exist."
+        fi
+    done
+
+    return 0 # success
+}
+
+# Run main with all and any arguments
+main "$@"
+
+exit $?
